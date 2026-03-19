@@ -1,65 +1,852 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useEffect, useMemo, useRef, useState } from "react";
+
+const CELL_SIZE = 14;
+const LABEL_SIZE = 28;
+const COUNT_SIZE = 16;
+const STORAGE_KEY = "quilt-grid-projects-v2";
+
+type GridSize = 40 | 60;
+type ToolMode = "paint" | "select";
+
+type QuiltProject = {
+  id: string;
+  name: string;
+  palette: string[];
+  selectedColor: number;
+  grid: number[][];
+  gridSize: GridSize;
+  updatedAt: number;
+};
+
+function createGrid(size: number) {
+  return Array.from({ length: size }, () =>
+    Array.from({ length: size }, () => 0)
+  );
+}
+
+function resizeGrid(prevGrid: number[][], nextSize: number) {
+  return Array.from({ length: nextSize }, (_, rowIndex) =>
+    Array.from({ length: nextSize }, (_, colIndex) => prevGrid[rowIndex]?.[colIndex] ?? 0)
+  );
+}
+
+function makeId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createBlankProject(name = "Untitled"): QuiltProject {
+  return {
+    id: makeId(),
+    name,
+    palette: [
+      "transparent", // 0 = transparent
+      "#ffffff",     // 1 = white
+      "#d9d9d9",
+      "#222222",
+      "#c84b31",
+    ],
+    selectedColor: 2,
+    gridSize: 40,
+    grid: createGrid(40),
+    updatedAt: Date.now(),
+  };
+}
+
+function makeCellKey(row: number, col: number) {
+  return `${row}-${col}`;
+}
+
+function parseCellKey(key: string) {
+  const [row, col] = key.split("-").map(Number);
+  return { row, col };
+}
+
+function getCellDisplayColor(color: string) {
+  return color === "transparent" ? "transparent" : color;
+}
+
+export default function Page() {
+  const [projects, setProjects] = useState<QuiltProject[]>([]);
+  const [currentProjectId, setCurrentProjectId] = useState<string>("");
+  const [gridSize, setGridSize] = useState<GridSize>(40);
+  const [palette, setPalette] = useState<string[]>([
+    "transparent",
+    "#ffffff",
+    "#d9d9d9",
+    "#222222",
+    "#c84b31",
+  ]);
+  const [selectedColor, setSelectedColor] = useState(2);
+  const [grid, setGrid] = useState<number[][]>(createGrid(40));
+  const [isPainting, setIsPainting] = useState(false);
+  const [toolMode, setToolMode] = useState<ToolMode>("paint");
+  const [message, setMessage] = useState("");
+  const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
+  const colorInputRef = useRef<HTMLInputElement | null>(null);
+
+  const currentProjectName =
+    projects.find((p) => p.id === currentProjectId)?.name ?? "Untitled";
+
+  const selectedHex = useMemo(() => {
+    return palette[selectedColor] ?? "#000000";
+  }, [palette, selectedColor]);
+
+  const activeBounds = useMemo(() => {
+    let firstActiveRow: number | null = null;
+    let firstActiveCol: number | null = null;
+
+    for (let row = 0; row < gridSize; row++) {
+      for (let col = 0; col < gridSize; col++) {
+        if ((grid[row]?.[col] ?? 0) !== 0) {
+          if (firstActiveRow === null || row < firstActiveRow) firstActiveRow = row;
+          if (firstActiveCol === null || col < firstActiveCol) firstActiveCol = col;
+        }
+      }
+    }
+
+    return { firstActiveRow, firstActiveCol };
+  }, [grid, gridSize]);
+
+  useEffect(() => {
+    const raw = localStorage.getItem(STORAGE_KEY);
+
+    if (!raw) {
+      const initial = createBlankProject("Untitled 1");
+      setProjects([initial]);
+      setCurrentProjectId(initial.id);
+      setGridSize(initial.gridSize);
+      setPalette(initial.palette);
+      setSelectedColor(initial.selectedColor);
+      setGrid(initial.grid);
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as {
+        projects?: QuiltProject[];
+        currentProjectId?: string;
+      };
+
+      if (!parsed.projects || parsed.projects.length === 0) {
+        const initial = createBlankProject("Untitled 1");
+        setProjects([initial]);
+        setCurrentProjectId(initial.id);
+        setGridSize(initial.gridSize);
+        setPalette(initial.palette);
+        setSelectedColor(initial.selectedColor);
+        setGrid(initial.grid);
+        return;
+      }
+
+      const loadedProjects = parsed.projects;
+      const activeId =
+        loadedProjects.find((p) => p.id === parsed.currentProjectId)?.id ??
+        loadedProjects[0].id;
+
+      const activeProject = loadedProjects.find((p) => p.id === activeId)!;
+
+      setProjects(loadedProjects);
+      setCurrentProjectId(activeId);
+      setGridSize(activeProject.gridSize);
+      setPalette(
+        activeProject.palette?.length
+          ? activeProject.palette
+          : ["transparent", "#ffffff", "#d9d9d9", "#222222", "#c84b31"]
+      );
+      setSelectedColor(activeProject.selectedColor ?? 2);
+      setGrid(resizeGrid(activeProject.grid, activeProject.gridSize));
+    } catch (error) {
+      console.error("Failed to load saved projects:", error);
+
+      const initial = createBlankProject("Untitled 1");
+      setProjects([initial]);
+      setCurrentProjectId(initial.id);
+      setGridSize(initial.gridSize);
+      setPalette(initial.palette);
+      setSelectedColor(initial.selectedColor);
+      setGrid(initial.grid);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      if (selectedCells.size === 0) return;
+
+      event.preventDefault();
+
+      setGrid((prev) =>
+        prev.map((row, rowIndex) =>
+          row.map((cell, colIndex) => {
+            const key = makeCellKey(rowIndex, colIndex);
+            return selectedCells.has(key) ? 0 : cell;
+          })
+        )
+      );
+
+      setSelectedCells(new Set());
+      setMessage("Selected cells cleared");
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedCells]);
+
+  const persistProjects = (
+    nextProjects: QuiltProject[],
+    nextCurrentProjectId: string
+  ) => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        projects: nextProjects,
+        currentProjectId: nextCurrentProjectId,
+      })
+    );
+    setProjects(nextProjects);
+    setCurrentProjectId(nextCurrentProjectId);
+  };
+
+  const buildCurrentProject = (overrides?: Partial<QuiltProject>): QuiltProject => ({
+    id: currentProjectId || makeId(),
+    name:
+      projects.find((p) => p.id === currentProjectId)?.name ??
+      overrides?.name ??
+      "Untitled",
+    palette,
+    selectedColor,
+    grid,
+    gridSize,
+    updatedAt: Date.now(),
+    ...overrides,
+  });
+
+  const loadProjectToCanvas = (project: QuiltProject) => {
+    setCurrentProjectId(project.id);
+    setGridSize(project.gridSize);
+    setPalette(project.palette);
+    setSelectedColor(
+      Math.min(project.selectedColor, Math.max(project.palette.length - 1, 0))
+    );
+    setGrid(resizeGrid(project.grid, project.gridSize));
+    setSelectedCells(new Set());
+    setMessage(`Loaded: ${project.name}`);
+  };
+
+  const paintCell = (rowIndex: number, colIndex: number) => {
+    setGrid((prev) =>
+      prev.map((row, r) =>
+        row.map((cell, c) => (r === rowIndex && c === colIndex ? selectedColor : cell))
+      )
+    );
+  };
+
+  const selectSingleCell = (rowIndex: number, colIndex: number) => {
+    const next = new Set<string>();
+    next.add(makeCellKey(rowIndex, colIndex));
+    setSelectedCells(next);
+  };
+
+  const addCellToSelection = (rowIndex: number, colIndex: number) => {
+    setSelectedCells((prev) => {
+      const next = new Set(prev);
+      next.add(makeCellKey(rowIndex, colIndex));
+      return next;
+    });
+  };
+
+  const handleCellMouseDown = (rowIndex: number, colIndex: number) => {
+    if (toolMode === "paint") {
+      setIsPainting(true);
+      paintCell(rowIndex, colIndex);
+      return;
+    }
+
+    setIsPainting(true);
+
+    if (window.event instanceof MouseEvent && (window.event.metaKey || window.event.ctrlKey)) {
+      addCellToSelection(rowIndex, colIndex);
+    } else {
+      selectSingleCell(rowIndex, colIndex);
+    }
+  };
+
+  const handleCellMouseEnter = (rowIndex: number, colIndex: number) => {
+    if (!isPainting) return;
+
+    if (toolMode === "paint") {
+      paintCell(rowIndex, colIndex);
+      return;
+    }
+
+    addCellToSelection(rowIndex, colIndex);
+  };
+
+  const handleReset = () => {
+    setGrid(createGrid(gridSize));
+    setSelectedCells(new Set());
+    setMessage("Grid reset");
+  };
+
+  const handlePaletteChange = (index: number, value: string) => {
+    setPalette((prev) => prev.map((color, i) => (i === index ? value : color)));
+  };
+
+  const handleAddColor = () => {
+    setPalette((prev) => {
+      const next = [...prev, "#88aaff"];
+      setSelectedColor(next.length - 1);
+      return next;
+    });
+  };
+
+  const handleRemoveSelectedColor = () => {
+    const index = selectedColor;
+    if (palette.length <= 2) return;
+    if (index === 0) return;
+
+    setPalette((prevPalette) => {
+      const nextPalette = prevPalette.filter((_, i) => i !== index);
+
+      setGrid((prevGrid) =>
+        prevGrid.map((row) =>
+          row.map((cell) => {
+            if (cell === index) return 0;
+            if (cell > index) return cell - 1;
+            return cell;
+          })
+        )
+      );
+
+      setSelectedColor((prevSelected) => {
+        if (prevSelected === index) return 1;
+        if (prevSelected > index) return prevSelected - 1;
+        return prevSelected;
+      });
+
+      return nextPalette;
+    });
+
+    setMessage("Selected color deleted");
+  };
+
+  const handleGridSizeChange = (nextSize: GridSize) => {
+    setGridSize(nextSize);
+    setGrid((prev) => resizeGrid(prev, nextSize));
+    setSelectedCells(new Set());
+    setMessage(`Grid changed to ${nextSize}×${nextSize}`);
+  };
+
+  const handleExportJpg = () => {
+    const scale = 4;
+    const canvas = document.createElement("canvas");
+    const width = gridSize * CELL_SIZE;
+    const height = gridSize * CELL_SIZE;
+
+    canvas.width = width * scale;
+    canvas.height = height * scale;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.scale(scale, scale);
+    ctx.imageSmoothingEnabled = false;
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+
+    for (let row = 0; row < gridSize; row++) {
+      for (let col = 0; col < gridSize; col++) {
+        const colorIndex = grid[row]?.[col] ?? 0;
+        if (colorIndex === 0) continue;
+        ctx.fillStyle = palette[colorIndex] ?? "#ffffff";
+        ctx.fillRect(col * CELL_SIZE, row * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+      }
+    }
+
+    const safeName =
+      currentProjectName.replace(/[^\w\-]+/g, "_").toLowerCase() || "quilt-grid";
+
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.95);
+    const link = document.createElement("a");
+    link.href = dataUrl;
+    link.download = `${safeName}-${gridSize}x${gridSize}.jpg`;
+    link.click();
+
+    setMessage("JPG exported");
+  };
+
+  const handleSaveAs = () => {
+    const defaultName = `Untitled ${projects.length + 1}`;
+    const name = window.prompt("Save as", defaultName)?.trim();
+    if (!name) return;
+
+    const newProject = buildCurrentProject({
+      id: makeId(),
+      name,
+      updatedAt: Date.now(),
+    });
+
+    const nextProjects = [newProject, ...projects];
+    persistProjects(nextProjects, newProject.id);
+    setMessage(`Saved as: ${name}`);
+  };
+
+  const handleUpdateSave = () => {
+    if (!currentProjectId) return;
+
+    const updatedProject = buildCurrentProject({
+      id: currentProjectId,
+      name: currentProjectName,
+      updatedAt: Date.now(),
+    });
+
+    const nextProjects = projects.map((project) =>
+      project.id === currentProjectId ? updatedProject : project
+    );
+
+    persistProjects(nextProjects, currentProjectId);
+    setMessage(`Updated: ${currentProjectName}`);
+  };
+
+  const handleRenameProject = (projectId: string) => {
+    const target = projects.find((p) => p.id === projectId);
+    if (!target) return;
+
+    const nextName = window.prompt("Rename project", target.name)?.trim();
+    if (!nextName) return;
+
+    const nextProjects = projects.map((project) =>
+      project.id === projectId
+        ? { ...project, name: nextName, updatedAt: Date.now() }
+        : project
+    );
+
+    persistProjects(nextProjects, projectId);
+    setMessage(`Renamed to: ${nextName}`);
+  };
+
+  const handleDeleteProject = (projectId: string) => {
+    if (projects.length <= 1) {
+      window.alert("At least one canvas is needed.");
+      return;
+    }
+
+    const target = projects.find((p) => p.id === projectId);
+    if (!target) return;
+
+    const ok = window.confirm(`Delete "${target.name}"?`);
+    if (!ok) return;
+
+    const nextProjects = projects.filter((p) => p.id !== projectId);
+    const nextActiveId =
+      currentProjectId === projectId ? nextProjects[0].id : currentProjectId;
+
+    persistProjects(nextProjects, nextActiveId);
+
+    const nextActiveProject = nextProjects.find((p) => p.id === nextActiveId)!;
+    loadProjectToCanvas(nextActiveProject);
+    setMessage(`Deleted: ${target.name}`);
+  };
+
+  const handleNewCanvas = () => {
+    const nextNumber = projects.length + 1;
+    const newProject = createBlankProject(`Untitled ${nextNumber}`);
+    const nextProjects = [newProject, ...projects];
+    persistProjects(nextProjects, newProject.id);
+    loadProjectToCanvas(newProject);
+    setMessage(`New canvas: ${newProject.name}`);
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <main
+      className="min-h-screen bg-neutral-100 p-6 select-none"
+      onMouseUp={() => setIsPainting(false)}
+      onMouseLeave={() => setIsPainting(false)}
+    >
+      <div className="mx-auto max-w-7xl">
+        <h1 className="mb-4 text-2xl font-bold">Quilt Grid Tool</h1>
+
+        <div className="mb-4 rounded-xl border bg-white p-3">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <button
+              onClick={handleNewCanvas}
+              className="rounded border bg-white px-3 py-2 text-sm"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+              New canvas
+            </button>
+
+            <button
+              onClick={handleSaveAs}
+              className="rounded border bg-white px-3 py-2 text-sm"
             >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+              Save as
+            </button>
+
+            <button
+              onClick={handleUpdateSave}
+              className="rounded border bg-white px-3 py-2 text-sm"
+            >
+              Update save
+            </button>
+
+            <button
+              onClick={handleReset}
+              className="rounded border bg-white px-3 py-2 text-sm"
+            >
+              Reset grid
+            </button>
+
+            <button
+              onClick={handleExportJpg}
+              className="rounded border bg-white px-3 py-2 text-sm"
+            >
+              Export JPG
+            </button>
+
+            <div className="ml-auto rounded border bg-neutral-50 px-3 py-2 text-sm">
+              Current: {currentProjectName}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {projects.map((project) => {
+              const isActive = project.id === currentProjectId;
+              return (
+                <div
+                  key={project.id}
+                  className={`flex items-center gap-1 rounded-lg border px-2 py-1 ${
+                    isActive ? "border-black bg-neutral-100" : "border-gray-300 bg-white"
+                  }`}
+                >
+                  <button
+                    onClick={() => loadProjectToCanvas(project)}
+                    className="max-w-[180px] truncate text-sm"
+                    title={project.name}
+                  >
+                    {project.name}
+                  </button>
+
+                  <button
+                    onClick={() => handleRenameProject(project.id)}
+                    className="rounded px-1 text-xs text-neutral-500 hover:bg-neutral-100"
+                    title="Rename"
+                  >
+                    ✎
+                  </button>
+
+                  <button
+                    onClick={() => handleDeleteProject(project.id)}
+                    className="rounded px-1 text-xs text-neutral-500 hover:bg-neutral-100"
+                    title="Delete"
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <button
+            onClick={handleAddColor}
+            className="rounded border bg-white px-3 py-2 text-sm"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+            Add color
+          </button>
+
+          <div className="flex items-center gap-2 rounded border bg-white px-3 py-2 text-sm">
+            <span>Tool</span>
+<button
+  onClick={() => {
+    setToolMode("paint");
+    setSelectedCells(new Set());
+  }}
+  className={`rounded border px-3 py-1 ${
+    toolMode === "paint" ? "border-black" : "border-gray-300"
+  }`}
+>
+  Paint
+</button>
+<button
+  onClick={() => setToolMode("select")}
+  className={`rounded border px-3 py-1 ${
+    toolMode === "select" ? "border-black" : "border-gray-300"
+  }`}
+>
+  Select
+</button>
+          </div>
+
+          <div className="flex items-center gap-2 rounded border bg-white px-3 py-2 text-sm">
+            <span>Grid</span>
+            <button
+              onClick={() => handleGridSizeChange(40)}
+              className={`rounded border px-3 py-1 ${
+                gridSize === 40 ? "border-black" : "border-gray-300"
+              }`}
+            >
+              40×40
+            </button>
+            <button
+              onClick={() => handleGridSizeChange(60)}
+              className={`rounded border px-3 py-1 ${
+                gridSize === 60 ? "border-black" : "border-gray-300"
+              }`}
+            >
+              60×60
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 rounded border bg-white px-3 py-2 text-sm">
+            <span>Selected color</span>
+            <button
+              onDoubleClick={() => colorInputRef.current?.click()}
+              className="h-6 w-6 rounded border relative overflow-hidden"
+              title="Double click to edit selected color"
+              style={{
+                background:
+                  selectedHex === "transparent"
+                    ? "repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50% / 10px 10px"
+                    : selectedHex,
+              }}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            <span>{selectedHex}</span>
+          </div>
+
+          <button
+            onClick={() => colorInputRef.current?.click()}
+            className="rounded border bg-white px-3 py-2 text-sm"
           >
-            Documentation
-          </a>
+            Edit selected
+          </button>
+
+          <button
+            onClick={handleRemoveSelectedColor}
+            className="rounded border bg-white px-3 py-2 text-sm"
+          >
+            Delete selected color
+          </button>
+
+          <input
+            ref={colorInputRef}
+            type="color"
+            value={selectedHex === "transparent" ? "#ffffff" : selectedHex}
+            onChange={(e) => handlePaletteChange(selectedColor, e.target.value)}
+            className="sr-only"
+          />
+
+          {message && (
+            <div className="rounded border bg-white px-3 py-2 text-sm">{message}</div>
+          )}
         </div>
-      </main>
-    </div>
+
+        <div className="mb-4 text-sm text-neutral-600">
+          Selectモードではドラッグで複数選択できます。Delete / Backspace で透明に戻ります。
+        </div>
+
+        <div className="mb-6 rounded-xl border bg-white p-3">
+          <div className="flex flex-wrap gap-2">
+            {palette.map((color, index) => {
+              const isTransparent = index === 0;
+              const isSelected = selectedColor === index;
+
+              return (
+                <button
+                  key={`${color}-${index}`}
+                  onClick={() => setSelectedColor(index)}
+                  onDoubleClick={() => {
+                    if (isTransparent) return;
+                    setSelectedColor(index);
+                    setTimeout(() => colorInputRef.current?.click(), 0);
+                  }}
+                  className={`h-7 w-7 rounded border relative ${
+                    isSelected ? "border-black ring-2 ring-black/20" : "border-gray-300"
+                  }`}
+                  style={{
+                    background: isTransparent
+                      ? "repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50% / 10px 10px"
+                      : color,
+                  }}
+                  aria-label={`select-color-${index}`}
+                  title={
+                    isTransparent
+                      ? "Transparent"
+                      : `Color ${index + 1} / double click to edit`
+                  }
+                />
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="overflow-auto rounded border bg-white p-3">
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: `${LABEL_SIZE}px ${COUNT_SIZE}px repeat(${gridSize}, ${CELL_SIZE}px)`,
+              gridTemplateRows: `${LABEL_SIZE}px ${COUNT_SIZE}px repeat(${gridSize}, ${CELL_SIZE}px)`,
+              width: "fit-content",
+            }}
+          >
+            <div
+              style={{
+                width: LABEL_SIZE,
+                height: LABEL_SIZE,
+                backgroundColor: "#f5f5f5",
+                borderRight: "1px solid #d4d4d4",
+                borderBottom: "1px solid #d4d4d4",
+              }}
+            />
+            <div
+              style={{
+                width: COUNT_SIZE,
+                height: LABEL_SIZE,
+                backgroundColor: "#fafafa",
+                borderRight: "1px solid #d4d4d4",
+                borderBottom: "1px solid #d4d4d4",
+              }}
+            />
+
+            {Array.from({ length: gridSize }, (_, colIndex) => (
+              <div
+                key={`col-label-${colIndex}`}
+                style={{
+                  width: CELL_SIZE,
+                  height: LABEL_SIZE,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 10,
+                  backgroundColor: "#f5f5f5",
+                  borderRight: "1px solid #d4d4d4",
+                  borderBottom: "1px solid #d4d4d4",
+                }}
+              >
+                {colIndex + 1}
+              </div>
+            ))}
+
+            <div
+              style={{
+                width: LABEL_SIZE,
+                height: COUNT_SIZE,
+                backgroundColor: "#fafafa",
+                borderRight: "1px solid #d4d4d4",
+                borderBottom: "1px solid #d4d4d4",
+              }}
+            />
+            <div
+              style={{
+                width: COUNT_SIZE,
+                height: COUNT_SIZE,
+                backgroundColor: "#fafafa",
+                borderRight: "1px solid #d4d4d4",
+                borderBottom: "1px solid #d4d4d4",
+              }}
+            />
+
+            {Array.from({ length: gridSize }, (_, colIndex) => {
+              const count =
+                activeBounds.firstActiveCol !== null && colIndex >= activeBounds.firstActiveCol
+                  ? colIndex - activeBounds.firstActiveCol + 1
+                  : "";
+
+              return (
+                <div
+                  key={`col-count-${colIndex}`}
+                  style={{
+                    width: CELL_SIZE,
+                    height: COUNT_SIZE,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 9,
+                    color: "#666",
+                    backgroundColor: "#fafafa",
+                    borderRight: "1px solid #e5e5e5",
+                    borderBottom: "1px solid #d4d4d4",
+                  }}
+                >
+                  {count}
+                </div>
+              );
+            })}
+
+            {Array.from({ length: gridSize }, (_, rowIndex) => (
+              <div key={`row-${rowIndex}`} style={{ display: "contents" }}>
+                <div
+                  style={{
+                    width: LABEL_SIZE,
+                    height: CELL_SIZE,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 10,
+                    backgroundColor: "#f5f5f5",
+                    borderRight: "1px solid #d4d4d4",
+                    borderBottom: "1px solid #d4d4d4",
+                  }}
+                >
+                  {rowIndex + 1}
+                </div>
+
+                <div
+                  style={{
+                    width: COUNT_SIZE,
+                    height: CELL_SIZE,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 9,
+                    color: "#666",
+                    backgroundColor: "#fafafa",
+                    borderRight: "1px solid #d4d4d4",
+                    borderBottom: "1px solid #d4d4d4",
+                  }}
+                >
+                  {activeBounds.firstActiveRow !== null && rowIndex >= activeBounds.firstActiveRow
+                    ? rowIndex - activeBounds.firstActiveRow + 1
+                    : ""}
+                </div>
+
+                {Array.from({ length: gridSize }, (_, colIndex) => {
+                  const colorIndex = grid[rowIndex]?.[colIndex] ?? 0;
+                  const cellKey = makeCellKey(rowIndex, colIndex);
+                  const isSelected = selectedCells.has(cellKey);
+                  const displayColor = palette[colorIndex] ?? "transparent";
+
+                  return (
+                    <button
+                      key={cellKey}
+                      onMouseDown={() => handleCellMouseDown(rowIndex, colIndex)}
+                      onMouseEnter={() => handleCellMouseEnter(rowIndex, colIndex)}
+                      className="border-0 p-0 relative"
+                      style={{
+                        width: CELL_SIZE,
+                        height: CELL_SIZE,
+                        borderRight: "1px solid #d4d4d4",
+                        borderBottom: "1px solid #d4d4d4",
+                        background:
+                          displayColor === "transparent"
+                            ? "repeating-conic-gradient(#eee 0% 25%, #fff 0% 50%) 50% / 8px 8px"
+                            : displayColor,
+                        outline: isSelected ? "2px solid #2563eb" : "none",
+                        outlineOffset: isSelected ? "-2px" : "0px",
+                      }}
+                      aria-label={`cell-${rowIndex}-${colIndex}`}
+                      draggable={false}
+                    />
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </main>
   );
 }
