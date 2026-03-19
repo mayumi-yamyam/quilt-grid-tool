@@ -28,7 +28,10 @@ function createGrid(size: number) {
 
 function resizeGrid(prevGrid: number[][], nextSize: number) {
   return Array.from({ length: nextSize }, (_, rowIndex) =>
-    Array.from({ length: nextSize }, (_, colIndex) => prevGrid[rowIndex]?.[colIndex] ?? 0)
+    Array.from(
+      { length: nextSize },
+      (_, colIndex) => prevGrid[rowIndex]?.[colIndex] ?? 0
+    )
   );
 }
 
@@ -41,8 +44,8 @@ function createBlankProject(name = "Untitled"): QuiltProject {
     id: makeId(),
     name,
     palette: [
-      "transparent", // 0 = transparent
-      "#ffffff",     // 1 = white
+      "transparent",
+      "#ffffff",
       "#d9d9d9",
       "#222222",
       "#c84b31",
@@ -58,13 +61,8 @@ function makeCellKey(row: number, col: number) {
   return `${row}-${col}`;
 }
 
-function parseCellKey(key: string) {
-  const [row, col] = key.split("-").map(Number);
-  return { row, col };
-}
-
-function getCellDisplayColor(color: string) {
-  return color === "transparent" ? "transparent" : color;
+function getTransparentBackground(size = 8) {
+  return `repeating-conic-gradient(#eee 0% 25%, #fff 0% 50%) 50% / ${size}px ${size}px`;
 }
 
 export default function Page() {
@@ -85,6 +83,7 @@ export default function Page() {
   const [message, setMessage] = useState("");
   const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
   const colorInputRef = useRef<HTMLInputElement | null>(null);
+  const gridWrapperRef = useRef<HTMLDivElement | null>(null);
 
   const currentProjectName =
     projects.find((p) => p.id === currentProjectId)?.name ?? "Untitled";
@@ -100,8 +99,12 @@ export default function Page() {
     for (let row = 0; row < gridSize; row++) {
       for (let col = 0; col < gridSize; col++) {
         if ((grid[row]?.[col] ?? 0) !== 0) {
-          if (firstActiveRow === null || row < firstActiveRow) firstActiveRow = row;
-          if (firstActiveCol === null || col < firstActiveCol) firstActiveCol = col;
+          if (firstActiveRow === null || row < firstActiveRow) {
+            firstActiveRow = row;
+          }
+          if (firstActiveCol === null || col < firstActiveCol) {
+            firstActiveCol = col;
+          }
         }
       }
     }
@@ -190,8 +193,21 @@ export default function Page() {
       setMessage("Selected cells cleared");
     };
 
+    const handlePointerUp = () => {
+      setIsPainting(false);
+    };
+
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("mouseup", handlePointerUp);
+    window.addEventListener("touchend", handlePointerUp);
+    window.addEventListener("touchcancel", handlePointerUp);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("mouseup", handlePointerUp);
+      window.removeEventListener("touchend", handlePointerUp);
+      window.removeEventListener("touchcancel", handlePointerUp);
+    };
   }, [selectedCells]);
 
   const persistProjects = (
@@ -209,7 +225,9 @@ export default function Page() {
     setCurrentProjectId(nextCurrentProjectId);
   };
 
-  const buildCurrentProject = (overrides?: Partial<QuiltProject>): QuiltProject => ({
+  const buildCurrentProject = (
+    overrides?: Partial<QuiltProject>
+  ): QuiltProject => ({
     id: currentProjectId || makeId(),
     name:
       projects.find((p) => p.id === currentProjectId)?.name ??
@@ -232,6 +250,7 @@ export default function Page() {
     );
     setGrid(resizeGrid(project.grid, project.gridSize));
     setSelectedCells(new Set());
+    setIsPainting(false);
     setMessage(`Loaded: ${project.name}`);
   };
 
@@ -257,7 +276,11 @@ export default function Page() {
     });
   };
 
-  const handleCellMouseDown = (rowIndex: number, colIndex: number) => {
+  const handleCellMouseDown = (
+    rowIndex: number,
+    colIndex: number,
+    event?: React.MouseEvent<HTMLButtonElement>
+  ) => {
     if (toolMode === "paint") {
       setIsPainting(true);
       paintCell(rowIndex, colIndex);
@@ -266,7 +289,7 @@ export default function Page() {
 
     setIsPainting(true);
 
-    if (window.event instanceof MouseEvent && (window.event.metaKey || window.event.ctrlKey)) {
+    if (event && (event.metaKey || event.ctrlKey)) {
       addCellToSelection(rowIndex, colIndex);
     } else {
       selectSingleCell(rowIndex, colIndex);
@@ -282,6 +305,54 @@ export default function Page() {
     }
 
     addCellToSelection(rowIndex, colIndex);
+  };
+
+  const handleTouchCell = (rowIndex: number, colIndex: number) => {
+    if (toolMode === "paint") {
+      paintCell(rowIndex, colIndex);
+      return;
+    }
+
+    addCellToSelection(rowIndex, colIndex);
+  };
+
+  const handleTouchStartCell = (rowIndex: number, colIndex: number) => {
+    setIsPainting(true);
+
+    if (toolMode === "paint") {
+      paintCell(rowIndex, colIndex);
+      return;
+    }
+
+    selectSingleCell(rowIndex, colIndex);
+  };
+
+  const handleTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
+    if (!isPainting) return;
+
+    const touch = event.touches[0];
+    if (!touch) return;
+
+    const element = document.elementFromPoint(
+      touch.clientX,
+      touch.clientY
+    ) as HTMLElement | null;
+
+    if (!element) return;
+
+    const cell = element.closest("[data-cell]") as HTMLElement | null;
+    if (!cell) return;
+
+    const rowAttr = cell.getAttribute("data-row");
+    const colAttr = cell.getAttribute("data-col");
+    if (rowAttr === null || colAttr === null) return;
+
+    const rowIndex = Number(rowAttr);
+    const colIndex = Number(colAttr);
+
+    if (Number.isNaN(rowIndex) || Number.isNaN(colIndex)) return;
+
+    handleTouchCell(rowIndex, colIndex);
   };
 
   const handleReset = () => {
@@ -462,51 +533,51 @@ export default function Page() {
 
   return (
     <main
-      className="min-h-screen bg-neutral-100 p-6 select-none"
+      className="min-h-screen bg-white text-black p-4 sm:p-6 select-none"
       onMouseUp={() => setIsPainting(false)}
       onMouseLeave={() => setIsPainting(false)}
     >
       <div className="mx-auto max-w-7xl">
         <h1 className="mb-4 text-2xl font-bold">Quilt Grid Tool</h1>
 
-        <div className="mb-4 rounded-xl border bg-white p-3">
+        <div className="mb-4 rounded-xl border border-gray-300 bg-white p-3">
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <button
               onClick={handleNewCanvas}
-              className="rounded border bg-white px-3 py-2 text-sm"
+              className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
             >
               New canvas
             </button>
 
             <button
               onClick={handleSaveAs}
-              className="rounded border bg-white px-3 py-2 text-sm"
+              className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
             >
               Save as
             </button>
 
             <button
               onClick={handleUpdateSave}
-              className="rounded border bg-white px-3 py-2 text-sm"
+              className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
             >
               Update save
             </button>
 
             <button
               onClick={handleReset}
-              className="rounded border bg-white px-3 py-2 text-sm"
+              className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
             >
               Reset grid
             </button>
 
             <button
               onClick={handleExportJpg}
-              className="rounded border bg-white px-3 py-2 text-sm"
+              className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
             >
               Export JPG
             </button>
 
-            <div className="ml-auto rounded border bg-neutral-50 px-3 py-2 text-sm">
+            <div className="w-full sm:ml-auto sm:w-auto rounded border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-black">
               Current: {currentProjectName}
             </div>
           </div>
@@ -518,12 +589,14 @@ export default function Page() {
                 <div
                   key={project.id}
                   className={`flex items-center gap-1 rounded-lg border px-2 py-1 ${
-                    isActive ? "border-black bg-neutral-100" : "border-gray-300 bg-white"
+                    isActive
+                      ? "border-black bg-gray-100"
+                      : "border-gray-300 bg-white"
                   }`}
                 >
                   <button
                     onClick={() => loadProjectToCanvas(project)}
-                    className="max-w-[180px] truncate text-sm"
+                    className="max-w-[180px] truncate text-sm text-black"
                     title={project.name}
                   >
                     {project.name}
@@ -531,7 +604,7 @@ export default function Page() {
 
                   <button
                     onClick={() => handleRenameProject(project.id)}
-                    className="rounded px-1 text-xs text-neutral-500 hover:bg-neutral-100"
+                    className="rounded px-1 text-xs text-gray-600 hover:bg-gray-100"
                     title="Rename"
                   >
                     ✎
@@ -539,7 +612,7 @@ export default function Page() {
 
                   <button
                     onClick={() => handleDeleteProject(project.id)}
-                    className="rounded px-1 text-xs text-neutral-500 hover:bg-neutral-100"
+                    className="rounded px-1 text-xs text-gray-600 hover:bg-gray-100"
                     title="Delete"
                   >
                     ×
@@ -553,35 +626,35 @@ export default function Page() {
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <button
             onClick={handleAddColor}
-            className="rounded border bg-white px-3 py-2 text-sm"
+            className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
           >
             Add color
           </button>
 
-          <div className="flex items-center gap-2 rounded border bg-white px-3 py-2 text-sm">
+          <div className="flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black">
             <span>Tool</span>
-<button
-  onClick={() => {
-    setToolMode("paint");
-    setSelectedCells(new Set());
-  }}
-  className={`rounded border px-3 py-1 ${
-    toolMode === "paint" ? "border-black" : "border-gray-300"
-  }`}
->
-  Paint
-</button>
-<button
-  onClick={() => setToolMode("select")}
-  className={`rounded border px-3 py-1 ${
-    toolMode === "select" ? "border-black" : "border-gray-300"
-  }`}
->
-  Select
-</button>
+            <button
+              onClick={() => {
+                setToolMode("paint");
+                setSelectedCells(new Set());
+              }}
+              className={`rounded border px-3 py-1 ${
+                toolMode === "paint" ? "border-black" : "border-gray-300"
+              }`}
+            >
+              Paint
+            </button>
+            <button
+              onClick={() => setToolMode("select")}
+              className={`rounded border px-3 py-1 ${
+                toolMode === "select" ? "border-black" : "border-gray-300"
+              }`}
+            >
+              Select
+            </button>
           </div>
 
-          <div className="flex items-center gap-2 rounded border bg-white px-3 py-2 text-sm">
+          <div className="flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black">
             <span>Grid</span>
             <button
               onClick={() => handleGridSizeChange(40)}
@@ -601,16 +674,20 @@ export default function Page() {
             </button>
           </div>
 
-          <div className="flex items-center gap-2 rounded border bg-white px-3 py-2 text-sm">
+          <div className="flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black">
             <span>Selected color</span>
             <button
-              onDoubleClick={() => colorInputRef.current?.click()}
+              onDoubleClick={() => {
+                if (selectedHex !== "transparent") {
+                  colorInputRef.current?.click();
+                }
+              }}
               className="h-6 w-6 rounded border relative overflow-hidden"
               title="Double click to edit selected color"
               style={{
                 background:
                   selectedHex === "transparent"
-                    ? "repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50% / 10px 10px"
+                    ? getTransparentBackground(10)
                     : selectedHex,
               }}
             />
@@ -618,15 +695,19 @@ export default function Page() {
           </div>
 
           <button
-            onClick={() => colorInputRef.current?.click()}
-            className="rounded border bg-white px-3 py-2 text-sm"
+            onClick={() => {
+              if (selectedHex !== "transparent") {
+                colorInputRef.current?.click();
+              }
+            }}
+            className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
           >
             Edit selected
           </button>
 
           <button
             onClick={handleRemoveSelectedColor}
-            className="rounded border bg-white px-3 py-2 text-sm"
+            className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
           >
             Delete selected color
           </button>
@@ -640,15 +721,17 @@ export default function Page() {
           />
 
           {message && (
-            <div className="rounded border bg-white px-3 py-2 text-sm">{message}</div>
+            <div className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black">
+              {message}
+            </div>
           )}
         </div>
 
-        <div className="mb-4 text-sm text-neutral-600">
+        <div className="mb-4 text-sm text-gray-600">
           Selectモードではドラッグで複数選択できます。Delete / Backspace で透明に戻ります。
         </div>
 
-        <div className="mb-6 rounded-xl border bg-white p-3">
+        <div className="mb-6 rounded-xl border border-gray-300 bg-white p-3">
           <div className="flex flex-wrap gap-2">
             {palette.map((color, index) => {
               const isTransparent = index === 0;
@@ -664,11 +747,13 @@ export default function Page() {
                     setTimeout(() => colorInputRef.current?.click(), 0);
                   }}
                   className={`h-7 w-7 rounded border relative ${
-                    isSelected ? "border-black ring-2 ring-black/20" : "border-gray-300"
+                    isSelected
+                      ? "border-black ring-2 ring-black/20"
+                      : "border-gray-300"
                   }`}
                   style={{
                     background: isTransparent
-                      ? "repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50% / 10px 10px"
+                      ? getTransparentBackground(10)
                       : color,
                   }}
                   aria-label={`select-color-${index}`}
@@ -683,7 +768,17 @@ export default function Page() {
           </div>
         </div>
 
-        <div className="overflow-auto rounded border bg-white p-3">
+        <div
+          ref={gridWrapperRef}
+          className="overflow-auto rounded border border-gray-300 bg-white p-3"
+          onTouchMove={(e) => {
+            if (isPainting) {
+              e.preventDefault();
+            }
+            handleTouchMove(e);
+          }}
+          style={{ touchAction: "none" }}
+        >
           <div
             style={{
               display: "grid",
@@ -724,6 +819,7 @@ export default function Page() {
                   backgroundColor: "#f5f5f5",
                   borderRight: "1px solid #d4d4d4",
                   borderBottom: "1px solid #d4d4d4",
+                  color: "#000",
                 }}
               >
                 {colIndex + 1}
@@ -751,7 +847,8 @@ export default function Page() {
 
             {Array.from({ length: gridSize }, (_, colIndex) => {
               const count =
-                activeBounds.firstActiveCol !== null && colIndex >= activeBounds.firstActiveCol
+                activeBounds.firstActiveCol !== null &&
+                colIndex >= activeBounds.firstActiveCol
                   ? colIndex - activeBounds.firstActiveCol + 1
                   : "";
 
@@ -789,6 +886,7 @@ export default function Page() {
                     backgroundColor: "#f5f5f5",
                     borderRight: "1px solid #d4d4d4",
                     borderBottom: "1px solid #d4d4d4",
+                    color: "#000",
                   }}
                 >
                   {rowIndex + 1}
@@ -808,7 +906,8 @@ export default function Page() {
                     borderBottom: "1px solid #d4d4d4",
                   }}
                 >
-                  {activeBounds.firstActiveRow !== null && rowIndex >= activeBounds.firstActiveRow
+                  {activeBounds.firstActiveRow !== null &&
+                  rowIndex >= activeBounds.firstActiveRow
                     ? rowIndex - activeBounds.firstActiveRow + 1
                     : ""}
                 </div>
@@ -822,8 +921,16 @@ export default function Page() {
                   return (
                     <button
                       key={cellKey}
-                      onMouseDown={() => handleCellMouseDown(rowIndex, colIndex)}
-                      onMouseEnter={() => handleCellMouseEnter(rowIndex, colIndex)}
+                      data-cell={cellKey}
+                      data-row={rowIndex}
+                      data-col={colIndex}
+                      onMouseDown={(e) =>
+                        handleCellMouseDown(rowIndex, colIndex, e)
+                      }
+                      onMouseEnter={() =>
+                        handleCellMouseEnter(rowIndex, colIndex)
+                      }
+                      onTouchStart={() => handleTouchStartCell(rowIndex, colIndex)}
                       className="border-0 p-0 relative"
                       style={{
                         width: CELL_SIZE,
@@ -832,7 +939,7 @@ export default function Page() {
                         borderBottom: "1px solid #d4d4d4",
                         background:
                           displayColor === "transparent"
-                            ? "repeating-conic-gradient(#eee 0% 25%, #fff 0% 50%) 50% / 8px 8px"
+                            ? getTransparentBackground(8)
                             : displayColor,
                         outline: isSelected ? "2px solid #2563eb" : "none",
                         outlineOffset: isSelected ? "-2px" : "0px",
