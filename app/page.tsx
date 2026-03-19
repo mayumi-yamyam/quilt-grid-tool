@@ -1,14 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type TouchEvent,
+} from "react";
 
-const CELL_SIZE = 14;
 const LABEL_SIZE = 28;
 const COUNT_SIZE = 16;
-const STORAGE_KEY = "quilt-grid-projects-v2";
+const STORAGE_KEY = "quilt-grid-projects-v4";
+const MAX_HISTORY = 50;
 
 type GridSize = 40 | 60;
-type ToolMode = "paint" | "select";
+type ToolMode = "paint" | "select" | "pan";
 
 type QuiltProject = {
   id: string;
@@ -17,6 +24,7 @@ type QuiltProject = {
   selectedColor: number;
   grid: number[][];
   gridSize: GridSize;
+  zoom: number;
   updatedAt: number;
 };
 
@@ -24,6 +32,10 @@ function createGrid(size: number) {
   return Array.from({ length: size }, () =>
     Array.from({ length: size }, () => 0)
   );
+}
+
+function cloneGrid(grid: number[][]) {
+  return grid.map((row) => [...row]);
 }
 
 function resizeGrid(prevGrid: number[][], nextSize: number) {
@@ -52,6 +64,7 @@ function createBlankProject(name = "Untitled"): QuiltProject {
     ],
     selectedColor: 2,
     gridSize: 40,
+    zoom: 1.4,
     grid: createGrid(40),
     updatedAt: Date.now(),
   };
@@ -62,12 +75,17 @@ function makeCellKey(row: number, col: number) {
 }
 
 function getTransparentBackground(size = 8) {
-  return `repeating-conic-gradient(#eee 0% 25%, #fff 0% 50%) 50% / ${size}px ${size}px`;
+  return `repeating-conic-gradient(#e5e5e5 0% 25%, #ffffff 0% 50%) 50% / ${size}px ${size}px`;
+}
+
+function getSafeColorValue(color: string) {
+  return color === "transparent" ? "#ffffff" : color;
 }
 
 export default function Page() {
   const [projects, setProjects] = useState<QuiltProject[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string>("");
+
   const [gridSize, setGridSize] = useState<GridSize>(40);
   const [palette, setPalette] = useState<string[]>([
     "transparent",
@@ -78,15 +96,37 @@ export default function Page() {
   ]);
   const [selectedColor, setSelectedColor] = useState(2);
   const [grid, setGrid] = useState<number[][]>(createGrid(40));
-  const [isPainting, setIsPainting] = useState(false);
+  const [zoom, setZoom] = useState(1.4);
+
   const [toolMode, setToolMode] = useState<ToolMode>("paint");
-  const [message, setMessage] = useState("");
+  const [isPainting, setIsPainting] = useState(false);
   const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
+  const [message, setMessage] = useState("");
+
+  const [history, setHistory] = useState<number[][][]>([]);
+  const [redoStack, setRedoStack] = useState<number[][][]>([]);
+
   const colorInputRef = useRef<HTMLInputElement | null>(null);
-  const gridWrapperRef = useRef<HTMLDivElement | null>(null);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+
+  const panStateRef = useRef<{
+    active: boolean;
+    startX: number;
+    startY: number;
+    startScrollLeft: number;
+    startScrollTop: number;
+  }>({
+    active: false,
+    startX: 0,
+    startY: 0,
+    startScrollLeft: 0,
+    startScrollTop: 0,
+  });
 
   const currentProjectName =
     projects.find((p) => p.id === currentProjectId)?.name ?? "Untitled";
+
+  const cellSize = Math.max(8, Math.round(14 * zoom));
 
   const selectedHex = useMemo(() => {
     return palette[selectedColor] ?? "#000000";
@@ -123,6 +163,7 @@ export default function Page() {
       setPalette(initial.palette);
       setSelectedColor(initial.selectedColor);
       setGrid(initial.grid);
+      setZoom(initial.zoom);
       return;
     }
 
@@ -140,6 +181,7 @@ export default function Page() {
         setPalette(initial.palette);
         setSelectedColor(initial.selectedColor);
         setGrid(initial.grid);
+        setZoom(initial.zoom);
         return;
       }
 
@@ -160,6 +202,7 @@ export default function Page() {
       );
       setSelectedColor(activeProject.selectedColor ?? 2);
       setGrid(resizeGrid(activeProject.grid, activeProject.gridSize));
+      setZoom(activeProject.zoom ?? 1.4);
     } catch (error) {
       console.error("Failed to load saved projects:", error);
 
@@ -170,15 +213,30 @@ export default function Page() {
       setPalette(initial.palette);
       setSelectedColor(initial.selectedColor);
       setGrid(initial.grid);
+      setZoom(initial.zoom);
     }
   }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      const isMod = event.metaKey || event.ctrlKey;
+
+      if (isMod && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+
+        if (event.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        return;
+      }
+
       if (event.key !== "Delete" && event.key !== "Backspace") return;
       if (selectedCells.size === 0) return;
 
       event.preventDefault();
+      pushHistory();
 
       setGrid((prev) =>
         prev.map((row, rowIndex) =>
@@ -193,22 +251,23 @@ export default function Page() {
       setMessage("Selected cells cleared");
     };
 
-    const handlePointerUp = () => {
+    const releasePointers = () => {
       setIsPainting(false);
+      panStateRef.current.active = false;
     };
 
     window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("mouseup", handlePointerUp);
-    window.addEventListener("touchend", handlePointerUp);
-    window.addEventListener("touchcancel", handlePointerUp);
+    window.addEventListener("mouseup", releasePointers);
+    window.addEventListener("touchend", releasePointers);
+    window.addEventListener("touchcancel", releasePointers);
 
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("mouseup", handlePointerUp);
-      window.removeEventListener("touchend", handlePointerUp);
-      window.removeEventListener("touchcancel", handlePointerUp);
+      window.removeEventListener("mouseup", releasePointers);
+      window.removeEventListener("touchend", releasePointers);
+      window.removeEventListener("touchcancel", releasePointers);
     };
-  }, [selectedCells]);
+  }, [grid, selectedCells]);
 
   const persistProjects = (
     nextProjects: QuiltProject[],
@@ -225,6 +284,47 @@ export default function Page() {
     setCurrentProjectId(nextCurrentProjectId);
   };
 
+  const clearHistoryStacks = () => {
+    setHistory([]);
+    setRedoStack([]);
+  };
+
+  const pushHistory = () => {
+    setHistory((prev) => {
+      const next = [...prev, cloneGrid(grid)];
+      return next.slice(-MAX_HISTORY);
+    });
+    setRedoStack([]);
+  };
+
+  const handleUndo = () => {
+    setHistory((prev) => {
+      if (prev.length === 0) return prev;
+
+      const last = prev[prev.length - 1];
+      setRedoStack((redo) => [cloneGrid(grid), ...redo].slice(0, MAX_HISTORY));
+      setGrid(cloneGrid(last));
+      setSelectedCells(new Set());
+      setMessage("Undo");
+
+      return prev.slice(0, -1);
+    });
+  };
+
+  const handleRedo = () => {
+    setRedoStack((prev) => {
+      if (prev.length === 0) return prev;
+
+      const next = prev[0];
+      setHistory((hist) => [...hist, cloneGrid(grid)].slice(-MAX_HISTORY));
+      setGrid(cloneGrid(next));
+      setSelectedCells(new Set());
+      setMessage("Redo");
+
+      return prev.slice(1);
+    });
+  };
+
   const buildCurrentProject = (
     overrides?: Partial<QuiltProject>
   ): QuiltProject => ({
@@ -237,9 +337,26 @@ export default function Page() {
     selectedColor,
     grid,
     gridSize,
+    zoom,
     updatedAt: Date.now(),
     ...overrides,
   });
+
+  const saveCurrentProjectState = () => {
+    if (!currentProjectId) return;
+
+    const updatedProject = buildCurrentProject({
+      id: currentProjectId,
+      name: currentProjectName,
+      updatedAt: Date.now(),
+    });
+
+    const nextProjects = projects.map((project) =>
+      project.id === currentProjectId ? updatedProject : project
+    );
+
+    persistProjects(nextProjects, currentProjectId);
+  };
 
   const loadProjectToCanvas = (project: QuiltProject) => {
     setCurrentProjectId(project.id);
@@ -249,17 +366,21 @@ export default function Page() {
       Math.min(project.selectedColor, Math.max(project.palette.length - 1, 0))
     );
     setGrid(resizeGrid(project.grid, project.gridSize));
+    setZoom(project.zoom ?? 1.4);
     setSelectedCells(new Set());
     setIsPainting(false);
+    clearHistoryStacks();
     setMessage(`Loaded: ${project.name}`);
   };
 
   const paintCell = (rowIndex: number, colIndex: number) => {
-    setGrid((prev) =>
-      prev.map((row, r) =>
+    setGrid((prev) => {
+      if (prev[rowIndex]?.[colIndex] === selectedColor) return prev;
+
+      return prev.map((row, r) =>
         row.map((cell, c) => (r === rowIndex && c === colIndex ? selectedColor : cell))
-      )
-    );
+      );
+    });
   };
 
   const selectSingleCell = (rowIndex: number, colIndex: number) => {
@@ -270,8 +391,11 @@ export default function Page() {
 
   const addCellToSelection = (rowIndex: number, colIndex: number) => {
     setSelectedCells((prev) => {
+      const key = makeCellKey(rowIndex, colIndex);
+      if (prev.has(key)) return prev;
+
       const next = new Set(prev);
-      next.add(makeCellKey(rowIndex, colIndex));
+      next.add(key);
       return next;
     });
   };
@@ -279,8 +403,12 @@ export default function Page() {
   const handleCellMouseDown = (
     rowIndex: number,
     colIndex: number,
-    event?: React.MouseEvent<HTMLButtonElement>
+    event?: MouseEvent<HTMLButtonElement>
   ) => {
+    if (toolMode === "pan") return;
+
+    pushHistory();
+
     if (toolMode === "paint") {
       setIsPainting(true);
       paintCell(rowIndex, colIndex);
@@ -298,6 +426,7 @@ export default function Page() {
 
   const handleCellMouseEnter = (rowIndex: number, colIndex: number) => {
     if (!isPainting) return;
+    if (toolMode === "pan") return;
 
     if (toolMode === "paint") {
       paintCell(rowIndex, colIndex);
@@ -308,6 +437,8 @@ export default function Page() {
   };
 
   const handleTouchCell = (rowIndex: number, colIndex: number) => {
+    if (toolMode === "pan") return;
+
     if (toolMode === "paint") {
       paintCell(rowIndex, colIndex);
       return;
@@ -317,6 +448,9 @@ export default function Page() {
   };
 
   const handleTouchStartCell = (rowIndex: number, colIndex: number) => {
+    if (toolMode === "pan") return;
+
+    pushHistory();
     setIsPainting(true);
 
     if (toolMode === "paint") {
@@ -327,7 +461,36 @@ export default function Page() {
     selectSingleCell(rowIndex, colIndex);
   };
 
-  const handleTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
+  const handleScrollerTouchStart = (event: TouchEvent<HTMLDivElement>) => {
+    if (toolMode !== "pan") return;
+
+    const touch = event.touches[0];
+    if (!touch || !scrollerRef.current) return;
+
+    panStateRef.current = {
+      active: true,
+      startX: touch.clientX,
+      startY: touch.clientY,
+      startScrollLeft: scrollerRef.current.scrollLeft,
+      startScrollTop: scrollerRef.current.scrollTop,
+    };
+  };
+
+  const handleScrollerTouchMove = (event: TouchEvent<HTMLDivElement>) => {
+    if (toolMode === "pan") {
+      const touch = event.touches[0];
+      if (!touch || !scrollerRef.current || !panStateRef.current.active) return;
+
+      event.preventDefault();
+
+      const dx = touch.clientX - panStateRef.current.startX;
+      const dy = touch.clientY - panStateRef.current.startY;
+
+      scrollerRef.current.scrollLeft = panStateRef.current.startScrollLeft - dx;
+      scrollerRef.current.scrollTop = panStateRef.current.startScrollTop - dy;
+      return;
+    }
+
     if (!isPainting) return;
 
     const touch = event.touches[0];
@@ -343,6 +506,8 @@ export default function Page() {
     const cell = element.closest("[data-cell]") as HTMLElement | null;
     if (!cell) return;
 
+    event.preventDefault();
+
     const rowAttr = cell.getAttribute("data-row");
     const colAttr = cell.getAttribute("data-col");
     if (rowAttr === null || colAttr === null) return;
@@ -356,6 +521,7 @@ export default function Page() {
   };
 
   const handleReset = () => {
+    pushHistory();
     setGrid(createGrid(gridSize));
     setSelectedCells(new Set());
     setMessage("Grid reset");
@@ -377,6 +543,8 @@ export default function Page() {
     const index = selectedColor;
     if (palette.length <= 2) return;
     if (index === 0) return;
+
+    pushHistory();
 
     setPalette((prevPalette) => {
       const nextPalette = prevPalette.filter((_, i) => i !== index);
@@ -404,17 +572,27 @@ export default function Page() {
   };
 
   const handleGridSizeChange = (nextSize: GridSize) => {
+    pushHistory();
     setGridSize(nextSize);
     setGrid((prev) => resizeGrid(prev, nextSize));
     setSelectedCells(new Set());
     setMessage(`Grid changed to ${nextSize}×${nextSize}`);
   };
 
+  const handleZoomIn = () => {
+    setZoom((prev) => Math.min(3, Number((prev + 0.2).toFixed(1))));
+  };
+
+  const handleZoomOut = () => {
+    setZoom((prev) => Math.max(0.6, Number((prev - 0.2).toFixed(1))));
+  };
+
   const handleExportJpg = () => {
+    const exportCell = 14;
     const scale = 4;
     const canvas = document.createElement("canvas");
-    const width = gridSize * CELL_SIZE;
-    const height = gridSize * CELL_SIZE;
+    const width = gridSize * exportCell;
+    const height = gridSize * exportCell;
 
     canvas.width = width * scale;
     canvas.height = height * scale;
@@ -433,7 +611,7 @@ export default function Page() {
         const colorIndex = grid[row]?.[col] ?? 0;
         if (colorIndex === 0) continue;
         ctx.fillStyle = palette[colorIndex] ?? "#ffffff";
-        ctx.fillRect(col * CELL_SIZE, row * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+        ctx.fillRect(col * exportCell, row * exportCell, exportCell, exportCell);
       }
     }
 
@@ -467,18 +645,7 @@ export default function Page() {
 
   const handleUpdateSave = () => {
     if (!currentProjectId) return;
-
-    const updatedProject = buildCurrentProject({
-      id: currentProjectId,
-      name: currentProjectName,
-      updatedAt: Date.now(),
-    });
-
-    const nextProjects = projects.map((project) =>
-      project.id === currentProjectId ? updatedProject : project
-    );
-
-    persistProjects(nextProjects, currentProjectId);
+    saveCurrentProjectState();
     setMessage(`Updated: ${currentProjectName}`);
   };
 
@@ -531,11 +698,23 @@ export default function Page() {
     setMessage(`New canvas: ${newProject.name}`);
   };
 
+  useEffect(() => {
+    if (!currentProjectId) return;
+    saveCurrentProjectState();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [palette, selectedColor, zoom]);
+
   return (
     <main
       className="min-h-screen bg-white text-black p-4 sm:p-6 select-none"
-      onMouseUp={() => setIsPainting(false)}
-      onMouseLeave={() => setIsPainting(false)}
+      onMouseUp={() => {
+        setIsPainting(false);
+        panStateRef.current.active = false;
+      }}
+      onMouseLeave={() => {
+        setIsPainting(false);
+        panStateRef.current.active = false;
+      }}
     >
       <div className="mx-auto max-w-7xl">
         <h1 className="mb-4 text-2xl font-bold">Quilt Grid Tool</h1>
@@ -625,6 +804,20 @@ export default function Page() {
 
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <button
+            onClick={handleUndo}
+            className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
+          >
+            Undo
+          </button>
+
+          <button
+            onClick={handleRedo}
+            className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
+          >
+            Redo
+          </button>
+
+          <button
             onClick={handleAddColor}
             className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
           >
@@ -652,6 +845,17 @@ export default function Page() {
             >
               Select
             </button>
+            <button
+              onClick={() => {
+                setToolMode("pan");
+                setSelectedCells(new Set());
+              }}
+              className={`rounded border px-3 py-1 ${
+                toolMode === "pan" ? "border-black" : "border-gray-300"
+              }`}
+            >
+              Pan
+            </button>
           </div>
 
           <div className="flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black">
@@ -675,21 +879,38 @@ export default function Page() {
           </div>
 
           <div className="flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black">
-            <span>Selected color</span>
+            <span>Zoom</span>
             <button
-              onDoubleClick={() => {
+              onClick={handleZoomOut}
+              className="rounded border border-gray-300 px-3 py-1"
+            >
+              −
+            </button>
+            <span>{Math.round(zoom * 100)}%</span>
+            <button
+              onClick={handleZoomIn}
+              className="rounded border border-gray-300 px-3 py-1"
+            >
+              +
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black">
+            <span>Selected</span>
+            <button
+              onClick={() => {
                 if (selectedHex !== "transparent") {
                   colorInputRef.current?.click();
                 }
               }}
-              className="h-6 w-6 rounded border relative overflow-hidden"
-              title="Double click to edit selected color"
+              className="h-7 w-7 rounded border overflow-hidden"
               style={{
                 background:
                   selectedHex === "transparent"
                     ? getTransparentBackground(10)
                     : selectedHex,
               }}
+              title="Edit selected color"
             />
             <span>{selectedHex}</span>
           </div>
@@ -702,7 +923,7 @@ export default function Page() {
             }}
             className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-black"
           >
-            Edit selected
+            Edit selected color
           </button>
 
           <button
@@ -715,7 +936,7 @@ export default function Page() {
           <input
             ref={colorInputRef}
             type="color"
-            value={selectedHex === "transparent" ? "#ffffff" : selectedHex}
+            value={getSafeColorValue(selectedHex)}
             onChange={(e) => handlePaletteChange(selectedColor, e.target.value)}
             className="sr-only"
           />
@@ -728,7 +949,7 @@ export default function Page() {
         </div>
 
         <div className="mb-4 text-sm text-gray-600">
-          Selectモードではドラッグで複数選択できます。Delete / Backspace で透明に戻ります。
+          Paint は塗る、Select は複数選択、Pan はスマホで画面を動かす用です。Undo は ⌘Z / Ctrl+Z、Redo は Shift+⌘Z / Ctrl+Shift+Z。
         </div>
 
         <div className="mb-6 rounded-xl border border-gray-300 bg-white p-3">
@@ -741,12 +962,7 @@ export default function Page() {
                 <button
                   key={`${color}-${index}`}
                   onClick={() => setSelectedColor(index)}
-                  onDoubleClick={() => {
-                    if (isTransparent) return;
-                    setSelectedColor(index);
-                    setTimeout(() => colorInputRef.current?.click(), 0);
-                  }}
-                  className={`h-7 w-7 rounded border relative ${
+                  className={`h-8 w-8 rounded border relative ${
                     isSelected
                       ? "border-black ring-2 ring-black/20"
                       : "border-gray-300"
@@ -757,11 +973,7 @@ export default function Page() {
                       : color,
                   }}
                   aria-label={`select-color-${index}`}
-                  title={
-                    isTransparent
-                      ? "Transparent"
-                      : `Color ${index + 1} / double click to edit`
-                  }
+                  title={isTransparent ? "Transparent" : `Color ${index + 1}`}
                 />
               );
             })}
@@ -769,21 +981,20 @@ export default function Page() {
         </div>
 
         <div
-          ref={gridWrapperRef}
+          ref={scrollerRef}
           className="overflow-auto rounded border border-gray-300 bg-white p-3"
-          onTouchMove={(e) => {
-            if (isPainting) {
-              e.preventDefault();
-            }
-            handleTouchMove(e);
+          onTouchStart={handleScrollerTouchStart}
+          onTouchMove={handleScrollerTouchMove}
+          style={{
+            touchAction: toolMode === "pan" ? "none" : "auto",
+            WebkitOverflowScrolling: "touch",
           }}
-          style={{ touchAction: "none" }}
         >
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: `${LABEL_SIZE}px ${COUNT_SIZE}px repeat(${gridSize}, ${CELL_SIZE}px)`,
-              gridTemplateRows: `${LABEL_SIZE}px ${COUNT_SIZE}px repeat(${gridSize}, ${CELL_SIZE}px)`,
+              gridTemplateColumns: `${LABEL_SIZE}px ${COUNT_SIZE}px repeat(${gridSize}, ${cellSize}px)`,
+              gridTemplateRows: `${LABEL_SIZE}px ${COUNT_SIZE}px repeat(${gridSize}, ${cellSize}px)`,
               width: "fit-content",
             }}
           >
@@ -810,7 +1021,7 @@ export default function Page() {
               <div
                 key={`col-label-${colIndex}`}
                 style={{
-                  width: CELL_SIZE,
+                  width: cellSize,
                   height: LABEL_SIZE,
                   display: "flex",
                   alignItems: "center",
@@ -856,7 +1067,7 @@ export default function Page() {
                 <div
                   key={`col-count-${colIndex}`}
                   style={{
-                    width: CELL_SIZE,
+                    width: cellSize,
                     height: COUNT_SIZE,
                     display: "flex",
                     alignItems: "center",
@@ -878,7 +1089,7 @@ export default function Page() {
                 <div
                   style={{
                     width: LABEL_SIZE,
-                    height: CELL_SIZE,
+                    height: cellSize,
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
@@ -895,7 +1106,7 @@ export default function Page() {
                 <div
                   style={{
                     width: COUNT_SIZE,
-                    height: CELL_SIZE,
+                    height: cellSize,
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
@@ -930,11 +1141,13 @@ export default function Page() {
                       onMouseEnter={() =>
                         handleCellMouseEnter(rowIndex, colIndex)
                       }
-                      onTouchStart={() => handleTouchStartCell(rowIndex, colIndex)}
+                      onTouchStart={() =>
+                        handleTouchStartCell(rowIndex, colIndex)
+                      }
                       className="border-0 p-0 relative"
                       style={{
-                        width: CELL_SIZE,
-                        height: CELL_SIZE,
+                        width: cellSize,
+                        height: cellSize,
                         borderRight: "1px solid #d4d4d4",
                         borderBottom: "1px solid #d4d4d4",
                         background:
